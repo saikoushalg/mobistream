@@ -1,0 +1,205 @@
+import 'dart:async';
+import 'package:flutter/foundation.dart';
+import 'package:haishin_kit/haishin_kit.dart';
+import 'package:permission_handler/permission_handler.dart';
+import 'stream_service.dart';
+import '../config/stream_config.dart';
+
+/// RTMP streaming service using HaishinKit v0.16.
+///
+/// Uses StreamSession for the RTMP connection and MediaMixer for
+/// camera/microphone capture. The phone pushes a live RTMP stream
+/// to a server (e.g. OBS with an RTMP server plugin, nginx-rtmp, etc.).
+class RtmpStreamService implements StreamService {
+  final StreamController<StreamState> _stateController =
+      StreamController<StreamState>.broadcast();
+  StreamState _currentState = StreamState.idle;
+
+  StreamSession? _session;
+  MediaMixer? _mixer;
+  StreamSubscription? _readyStateSubscription;
+
+  /// The base RTMP URL to push to. The camera number will be appended.
+  /// Example: rtmp://192.168.1.100/live  →  rtmp://192.168.1.100/live/cam1
+  String rtmpBaseUrl = 'rtmp://192.168.1.100/live';
+
+  RtmpStreamService();
+
+  @override
+  Stream<StreamState> get stateStream => _stateController.stream;
+
+  @override
+  StreamState get currentState => _currentState;
+
+  /// Expose the StreamSession so UI can render a preview via StreamSessionViewTexture.
+  StreamSession? get session => _session;
+
+  /// Request camera and microphone permissions.
+  /// Returns true if both are granted.
+  Future<bool> requestPermissions() async {
+    final cameraStatus = await Permission.camera.request();
+    if (!cameraStatus.isGranted) {
+      debugPrint('RtmpStreamService: Camera permission denied');
+      return false;
+    }
+
+    final micStatus = await Permission.microphone.request();
+    if (!micStatus.isGranted) {
+      debugPrint('RtmpStreamService: Microphone permission denied');
+      return false;
+    }
+
+    debugPrint('RtmpStreamService: All permissions granted');
+    return true;
+  }
+
+  @override
+  Future<void> startStream({
+    required int port,
+    required StreamConfig config,
+    int cameraNumber = 1,
+  }) async {
+    if (_currentState == StreamState.streaming ||
+        _currentState == StreamState.starting) {
+      return;
+    }
+
+    _setState(StreamState.starting);
+
+    try {
+      // 1) Request permissions first
+      final hasPermissions = await requestPermissions();
+      if (!hasPermissions) {
+        debugPrint('RtmpStreamService: Permissions not granted');
+        _setState(StreamState.error);
+        return;
+      }
+
+      // 2) Create and configure the MediaMixer (camera + mic capture)
+      _mixer = await MediaMixer.create();
+
+      // Attach rear camera on track 0
+      await _mixer!.attachVideo(
+        0,
+        VideoSource(
+          id: 'camera_0',
+          position: CameraPosition.back,
+        ),
+      );
+
+      // Attach microphone on track 0
+      await _mixer!.attachAudio(0, AudioSource());
+
+      // Start the mixer (begins camera capture)
+      await _mixer!.startRunning();
+
+      // 3) Build the RTMP URL with camera number
+      final rtmpUrl = '$rtmpBaseUrl/cam$cameraNumber';
+      debugPrint('RtmpStreamService: Connecting to $rtmpUrl');
+
+      // 4) Create an RTMP publish session
+      _session = await StreamSession.create(rtmpUrl, StreamSessionMode.publish);
+
+      // Configure video codec
+      _session!.videoSettings = VideoCodecSettings(
+        width: config.resolutionWidth,
+        height: config.resolutionHeight,
+        bitrate: config.videoBitrate,
+        frameInterval: 2,
+        profileLevel: ProfileLevel.h264Baseline31,
+      );
+
+      // Configure audio codec
+      _session!.audioSettings = AudioCodecSettings(
+        bitrate: config.audioBitrate,
+      );
+
+      // 5) Listen for connection state changes
+      _readyStateSubscription = _session!.readyState.listen((state) {
+        debugPrint('RtmpStreamService: ReadyState = $state');
+        switch (state) {
+          case StreamSessionReadyState.connecting:
+            _setState(StreamState.starting);
+            break;
+          case StreamSessionReadyState.open:
+            _setState(StreamState.streaming);
+            break;
+          case StreamSessionReadyState.closing:
+            break;
+          case StreamSessionReadyState.closed:
+            if (_currentState == StreamState.streaming) {
+              _setState(StreamState.ready);
+            }
+            break;
+        }
+      }, onError: (error) {
+        debugPrint('RtmpStreamService: ReadyState error - $error');
+        _setState(StreamState.error);
+      });
+
+      // 6) Connect to the RTMP server
+      await _session!.connect();
+
+      debugPrint('RtmpStreamService: Connection initiated to $rtmpUrl');
+    } catch (e) {
+      debugPrint('RtmpStreamService: Start Error - $e');
+      _setState(StreamState.error);
+      // Clean up on error
+      await _cleanupResources();
+    }
+  }
+
+  @override
+  Future<void> stopStream() async {
+    if (_currentState == StreamState.idle) {
+      return;
+    }
+
+    try {
+      debugPrint('RtmpStreamService: Stopping stream');
+      await _cleanupResources();
+      _setState(StreamState.idle);
+      debugPrint('RtmpStreamService: Stream stopped');
+    } catch (e) {
+      debugPrint('RtmpStreamService: Stop Error - $e');
+      _setState(StreamState.idle);
+    }
+  }
+
+  Future<void> _cleanupResources() async {
+    _readyStateSubscription?.cancel();
+    _readyStateSubscription = null;
+
+    try {
+      await _session?.close();
+    } catch (_) {}
+    try {
+      await _session?.dispose();
+    } catch (_) {}
+    _session = null;
+
+    try {
+      await _mixer?.stopRunning();
+    } catch (_) {}
+    try {
+      await _mixer?.dispose();
+    } catch (_) {}
+    _mixer = null;
+  }
+
+  @override
+  Future<void> dispose() async {
+    await stopStream();
+    await _stateController.close();
+  }
+
+  @override
+  String getObsStreamUrl(String phoneIp, int port) {
+    return rtmpBaseUrl;
+  }
+
+  void _setState(StreamState state) {
+    _currentState = state;
+    _stateController.add(state);
+  }
+}

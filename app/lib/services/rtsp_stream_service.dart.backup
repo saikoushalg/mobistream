@@ -1,0 +1,142 @@
+import 'dart:async';
+import 'package:flutter/foundation.dart';
+import 'package:flutter/services.dart';
+import 'package:permission_handler/permission_handler.dart';
+import '../config/stream_config.dart';
+import 'stream_service.dart';
+import 'network_info.dart';
+
+/// RTSP streaming service using native platform implementation.
+/// The phone acts as an RTSP server that OBS can connect to directly.
+class RtspStreamService implements StreamService {
+  // State management
+  final StreamController<StreamState> _stateController =
+      StreamController<StreamState>.broadcast();
+  StreamState _currentState = StreamState.idle;
+
+  // Platform channel for native RTSP server
+  static const MethodChannel _channel = MethodChannel('mobistream/rtsp');
+
+  // Configuration
+  String _phoneIp = '';
+  int _serverPort = 0;
+  late StreamConfig _currentConfig;
+
+  @override
+  Stream<StreamState> get stateStream => _stateController.stream;
+
+  @override
+  StreamState get currentState => _currentState;
+
+  @override
+  Future<void> startStream({
+    required int port,
+    required StreamConfig config,
+    int cameraNumber = 1,
+  }) async {
+    if (_currentState == StreamState.streaming) return;
+
+    _setState(StreamState.starting);
+    _currentConfig = config;
+
+    try {
+      // 1. Request permissions
+      final hasPermissions = await _requestPermissions();
+      if (!hasPermissions) {
+        _setState(StreamState.error);
+        return;
+      }
+
+      // 2. Get IP address
+      final networkInfoService = NetworkInfoService();
+      final networkInfo = await networkInfoService.getConnectionInfo();
+      if (networkInfo == null) {
+        debugPrint('RtspStreamService: Failed to get network info');
+        _setState(StreamState.error);
+        return;
+      }
+      _phoneIp = networkInfo.ipAddress;
+
+      // 3. Start RTSP server via native code (handles camera too)
+      final result = await _channel.invokeMapMethod<String, dynamic>(
+        'startRtspServer',
+        {
+          'port': port,
+          'width': _currentConfig.resolutionWidth,
+          'height': _currentConfig.resolutionHeight,
+          'fps': _currentConfig.fps,
+          'bitrate': _currentConfig.videoBitrate,
+          'cameraId': cameraNumber - 1, // 0-indexed for native
+        },
+      );
+
+      if (result == null || result['success'] != true) {
+        debugPrint('RtspStreamService: Failed to start RTSP server');
+        _setState(StreamState.error);
+        return;
+      }
+
+      _serverPort = result['port'] as int? ?? port;
+      _setState(StreamState.ready);
+
+      debugPrint('RtspStreamService: RTSP server ready at '
+          'rtsp://$_phoneIp:$_serverPort/stream');
+    } catch (e) {
+      debugPrint('RtspStreamService: Start error - $e');
+      _setState(StreamState.error);
+      await _cleanupResources();
+    }
+  }
+
+  Future<bool> _requestPermissions() async {
+    final cameraStatus = await Permission.camera.request();
+    if (!cameraStatus.isGranted) {
+      debugPrint('RtspStreamService: Camera permission denied');
+      return false;
+    }
+
+    final micStatus = await Permission.microphone.request();
+    if (!micStatus.isGranted) {
+      debugPrint('RtspStreamService: Microphone permission denied');
+      return false;
+    }
+
+    return true;
+  }
+
+  void _setState(StreamState state) {
+    _currentState = state;
+    _stateController.add(state);
+  }
+
+  @override
+  Future<void> stopStream() async {
+    if (_currentState == StreamState.idle) return;
+
+    debugPrint('RtspStreamService: Stopping stream');
+    await _cleanupResources();
+    _setState(StreamState.idle);
+  }
+
+  Future<void> _cleanupResources() async {
+    // Stop RTSP server (native code handles camera cleanup)
+    try {
+      await _channel.invokeMethod('stopRtspServer');
+    } catch (e) {
+      debugPrint('RtspStreamService: Error stopping RTSP server - $e');
+    }
+
+    debugPrint('RtspStreamService: Resources cleaned up');
+  }
+
+  @override
+  Future<void> dispose() async {
+    await _cleanupResources();
+    await _stateController.close();
+  }
+
+  @override
+  String getObsStreamUrl(String phoneIp, int port) {
+    return 'rtsp://$phoneIp:$port/stream';
+  }
+}

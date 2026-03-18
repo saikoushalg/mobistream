@@ -1,0 +1,16 @@
+{
+  "permissions": {
+    "allow": [
+      "WebSearch",
+      "Bash(flutter pub get:*)",
+      "Bash(flutter analyze:*)",
+      "Bash(flutter:*)",
+      "Bash(timeout:*)",
+      "Bash(adb:*)",
+      "Bash(\"C:\\\\Users\\\\saiko\\\\AppData\\\\Local\\\\Android\\\\Sdk\\\\platform-tools\\\\adb.exe\":*)",
+      "Bash(\"C:\\\\Users\\\\saiko\\\\AppData\\\\Local\\\\Android\\\\Sdk\\\\platform-tools\\\\adb.exe\" -s emulator-5554 logcat -d)",
+      "Bash(find:*)",
+      "Bash(dir /b ios)"
+    ]
+  }
+}

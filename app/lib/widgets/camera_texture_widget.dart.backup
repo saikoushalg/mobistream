@@ -1,0 +1,31 @@
+import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
+
+/// Widget that displays the native camera preview via SurfaceTexture.
+class CameraTextureWidget extends StatefulWidget {
+  final int textureId;
+
+  const CameraTextureWidget({
+    super.key,
+    required this.textureId,
+  });
+
+  @override
+  State<CameraTextureWidget> createState() => _CameraTextureWidgetState();
+}
+
+class _CameraTextureWidgetState extends State<CameraTextureWidget> {
+  @override
+  Widget build(BuildContext context) {
+    if (widget.textureId <= 0) {
+      return const ColoredBox(
+        color: Colors.black,
+        child: Center(
+          child: CircularProgressIndicator(color: Colors.white),
+        ),
+      );
+    }
+
+    return Texture(textureId: widget.textureId);
+  }
+}

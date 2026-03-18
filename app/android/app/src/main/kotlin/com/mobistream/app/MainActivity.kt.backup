@@ -1,0 +1,628 @@
+package com.mobistream.app
+
+import android.Manifest
+import android.content.pm.PackageManager
+import android.graphics.SurfaceTexture
+import android.hardware.camera2.CameraCaptureSession
+import android.hardware.camera2.CameraDevice
+import android.hardware.camera2.CameraManager
+import android.media.MediaCodec
+import android.media.MediaCodecInfo
+import android.media.MediaFormat
+import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
+import android.util.Log
+import android.view.Surface
+import androidx.core.app.ActivityCompat
+import io.flutter.embedding.android.FlutterActivity
+import io.flutter.embedding.engine.FlutterEngine
+import io.flutter.plugin.common.EventChannel
+import io.flutter.plugin.common.MethodChannel
+import io.flutter.view.TextureRegistry
+import java.io.BufferedReader
+import java.io.ByteArrayOutputStream
+import java.io.DataOutputStream
+import java.io.IOException
+import java.io.InputStreamReader
+import java.net.InetAddress
+import java.net.ServerSocket
+import java.net.Socket
+import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicInteger
+
+class MainActivity : FlutterActivity() {
+    private val CHANNEL = "mobistream/rtsp"
+    private val TEXTURE_CHANNEL = "mobistream/texture"
+    private val TAG = "MobistreamRTSP"
+
+    private var rtspServerThread: Thread? = null
+    private var rtpSenderThread: Thread? = null
+    private var cameraDevice: CameraDevice? = null
+    private var mediaCodec: MediaCodec? = null
+    private var surfaceTexture: SurfaceTexture? = null
+    private var surface: Surface? = null
+    private var isStreaming = AtomicBoolean(false)
+    private var serverSocket: ServerSocket? = null
+    private var serverPort = 0
+    private val mainHandler = Handler(Looper.getMainLooper())
+
+    // Texture registry for camera preview
+    private var textureEntry: TextureRegistry.SurfaceTextureEntry? = null
+
+    // RTSP session state
+    private var rtspSessionActive = AtomicBoolean(false)
+    private var clientAddress: InetAddress? = null
+    private var clientRtpPort = 0
+    private var clientRtcpPort = 0
+    private var rtpSocket: Socket? = null
+    private val cseq = AtomicInteger(0)
+    private var session_id = System.currentTimeMillis().toString()
+
+    // SPS and PPS for SDP
+    private var sps: ByteArray? = null
+    private var pps: ByteArray? = null
+
+    // Frame queue for RTP streaming
+    private val frameQueue = mutableListOf<ByteArray>()
+    private val frameQueueLock = Any()
+
+    // RTP sequence number
+    private var rtpSequenceNumber = AtomicInteger(0)
+
+    override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
+        super.configureFlutterEngine(flutterEngine)
+
+        MethodChannel(flutterEngine.dartExecutor.binaryMessenger, CHANNEL).setMethodCallHandler { call, result ->
+            when (call.method) {
+                "startRtspServer" -> {
+                    val port = call.argument<Int>("port") ?: 9000
+                    val width = call.argument<Int>("width") ?: 1920
+                    val height = call.argument<Int>("height") ?: 1080
+                    val fps = call.argument<Int>("fps") ?: 30
+                    val bitrate = call.argument<Int>("bitrate") ?: 4000000
+                    val cameraId = call.argument<Int>("cameraId") ?: 0
+
+                    startRtspServer(port, width, height, fps, bitrate, cameraId) { success, actualPort ->
+                        activity?.runOnUiThread {
+                            if (success) {
+                                result.success(mapOf("success" to true, "port" to (actualPort ?: port)))
+                            } else {
+                                result.success(mapOf("success" to false))
+                            }
+                        }
+                    }
+                }
+                "stopRtspServer" -> {
+                    stopRtspServer()
+                    result.success(null)
+                }
+                else -> result.notImplemented()
+            }
+        }
+
+        // Event channel for texture ID updates
+        EventChannel(flutterEngine.dartExecutor.binaryMessenger, TEXTURE_CHANNEL).setStreamHandler(
+            object : EventChannel.StreamHandler {
+                override fun onListen(arguments: Any?, events: EventChannel.EventSink?) {
+                    textureEntry?.id()?.let { id ->
+                        events?.success(id)
+                    }
+                }
+
+                override fun onCancel(arguments: Any?) {}
+            }
+        )
+    }
+
+    private fun startRtspServer(
+        port: Int,
+        width: Int,
+        height: Int,
+        fps: Int,
+        bitrate: Int,
+        cameraId: Int,
+        callback: (Boolean, Int?) -> Unit
+    ) {
+        if (isStreaming.get()) {
+            stopRtspServer()
+            Thread.sleep(500)
+        }
+
+        try {
+            serverSocket?.close()
+            serverSocket = ServerSocket(port)
+            serverPort = serverSocket!!.localPort
+            Log.d(TAG, "RTSP server listening on port $serverPort")
+
+            initializeCameraAndEncoder(cameraId, width, height, fps, bitrate) { success ->
+                if (success) {
+                    isStreaming.set(true)
+                    callback(true, serverPort)
+
+                    rtspServerThread = Thread { runRtspServer() }.apply { start() }
+                } else {
+                    callback(false, null)
+                }
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Error starting RTSP server", e)
+            callback(false, null)
+        }
+    }
+
+    private fun initializeCameraAndEncoder(
+        cameraId: Int,
+        width: Int,
+        height: Int,
+        fps: Int,
+        bitrate: Int,
+        callback: (Boolean) -> Unit
+    ) {
+        try {
+            val cameraManager = getSystemService(android.content.Context.CAMERA_SERVICE) as CameraManager
+            val cameraIds = cameraManager.cameraIdList
+
+            if (cameraIds.isEmpty()) {
+                Log.e(TAG, "No cameras available")
+                callback(false)
+                return
+            }
+
+            val actualCameraId = if (cameraId < cameraIds.size) cameraIds[cameraId] else cameraIds[0]
+
+            // Create SurfaceTexture for camera
+            surfaceTexture = SurfaceTexture(0)
+            surfaceTexture?.setDefaultBufferSize(width, height)
+            surface = Surface(surfaceTexture)
+
+            val format = MediaFormat.createVideoFormat(MediaFormat.MIMETYPE_VIDEO_AVC, width, height)
+            format.setInteger(MediaFormat.KEY_COLOR_FORMAT, MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface)
+            format.setInteger(MediaFormat.KEY_BIT_RATE, bitrate)
+            format.setInteger(MediaFormat.KEY_FRAME_RATE, fps)
+            format.setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, 2)
+            format.setInteger(MediaFormat.KEY_PROFILE, MediaCodecInfo.CodecProfileLevel.AVCProfileBaseline)
+
+            mediaCodec = MediaCodec.createEncoderByType(MediaFormat.MIMETYPE_VIDEO_AVC)
+            mediaCodec?.configure(format, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
+            val encoderSurface = mediaCodec?.createInputSurface()
+            mediaCodec?.start()
+
+            if (ActivityCompat.checkSelfPermission(this, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED) {
+                cameraManager.openCamera(actualCameraId, object : CameraDevice.StateCallback() {
+                    override fun onOpened(camera: CameraDevice) {
+                        cameraDevice = camera
+                        Log.d(TAG, "Camera opened: $actualCameraId")
+
+                        try {
+                            val surfaces = mutableListOf<Surface>()
+                            surface?.let { surfaces.add(it) }
+                            encoderSurface?.let { surfaces.add(it) }
+
+                            val captureRequest = camera.createCaptureRequest(CameraDevice.TEMPLATE_RECORD).apply {
+                                surfaces.forEach { addTarget(it) }
+                            }
+                            camera.createCaptureSession(surfaces, object : CameraCaptureSession.StateCallback() {
+                                override fun onConfigured(session: CameraCaptureSession) {
+                                    try {
+                                        session.setRepeatingRequest(captureRequest.build(), null, null)
+                                        startEncodedFrameConsumer()
+                                        callback(true)
+                                    } catch (e: Exception) {
+                                        Log.e(TAG, "Error starting capture", e)
+                                        callback(false)
+                                    }
+                                }
+
+                                override fun onConfigureFailed(session: CameraCaptureSession) {
+                                    Log.e(TAG, "Camera capture session configuration failed")
+                                    callback(false)
+                                }
+                            }, null)
+                        } catch (e: Exception) {
+                            Log.e(TAG, "Error creating capture session", e)
+                            callback(false)
+                        }
+                    }
+
+                    override fun onDisconnected(camera: CameraDevice) {
+                        Log.d(TAG, "Camera disconnected")
+                        cameraDevice?.close()
+                        cameraDevice = null
+                    }
+
+                    override fun onError(camera: CameraDevice, error: Int) {
+                        Log.e(TAG, "Camera error: $error")
+                        cameraDevice?.close()
+                        cameraDevice = null
+                        callback(false)
+                    }
+                }, mainHandler)
+            } else {
+                Log.e(TAG, "Camera permission not granted")
+                callback(false)
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Error initializing camera and encoder", e)
+            callback(false)
+        }
+    }
+
+    private fun startEncodedFrameConsumer() {
+        Thread {
+            val bufferInfo = MediaCodec.BufferInfo()
+            var frameCount = 0
+
+            while (isStreaming.get()) {
+                try {
+                    val index = mediaCodec?.dequeueOutputBuffer(bufferInfo, 10000) ?: -1
+                    if (index >= 0) {
+                        val outputBuffer = mediaCodec?.getOutputBuffer(index)
+                        outputBuffer?.let {
+                            it.position(bufferInfo.offset)
+                            it.limit(bufferInfo.offset + bufferInfo.size)
+
+                            val data = ByteArray(bufferInfo.size)
+                            it.get(data)
+
+                            if (bufferInfo.flags and MediaCodec.BUFFER_FLAG_KEY_FRAME != 0) {
+                                extractSpsAndPps(data)
+                                frameCount++
+                            }
+
+                            synchronized(frameQueueLock) {
+                                if (frameQueue.size > 30) {
+                                    frameQueue.removeAt(0)
+                                }
+                                frameQueue.add(data)
+                            }
+
+                            mediaCodec?.releaseOutputBuffer(index, false)
+                        }
+                    }
+                } catch (e: Exception) {
+                    if (isStreaming.get()) {
+                        Log.e(TAG, "Error consuming frame", e)
+                    }
+                }
+            }
+        }.start()
+    }
+
+    private fun extractSpsAndPps(data: ByteArray) {
+        var i = 0
+        while (i < data.size - 4) {
+            if (data[i].toInt() == 0x00 && data[i+1].toInt() == 0x00 &&
+                data[i+2].toInt() == 0x00 && data[i+3].toInt() == 0x01) {
+                val nalType = data[i+4].toInt() and 0x1F
+                when (nalType) {
+                    7 -> {
+                        val end = findNalEnd(data, i + 4)
+                        sps = data.copyOfRange(i, end)
+                        Log.d(TAG, "Extracted SPS: ${sps?.size} bytes")
+                    }
+                    8 -> {
+                        val end = findNalEnd(data, i + 4)
+                        pps = data.copyOfRange(i, end)
+                        Log.d(TAG, "Extracted PPS: ${pps?.size} bytes")
+                    }
+                }
+            }
+            i++
+        }
+    }
+
+    private fun findNalEnd(data: ByteArray, start: Int): Int {
+        for (i in start until data.size - 4) {
+            if (data[i].toInt() == 0x00 && data[i+1].toInt() == 0x00 &&
+                data[i+2].toInt() == 0x00 && data[i+3].toInt() == 0x01) {
+                return i
+            }
+        }
+        return data.size
+    }
+
+    private fun runRtspServer() {
+        while (isStreaming.get()) {
+            try {
+                val clientSocket = serverSocket?.accept()
+                clientSocket?.let { handleRtspClient(it) }
+            } catch (e: IOException) {
+                if (isStreaming.get()) {
+                    Log.e(TAG, "Error accepting client", e)
+                }
+            }
+        }
+    }
+
+    private fun handleRtspClient(clientSocket: Socket) {
+        try {
+            val input = clientSocket.getInputStream()
+            val output = DataOutputStream(clientSocket.getOutputStream())
+
+            val reader = BufferedReader(InputStreamReader(input))
+            var line: String?
+            var requestLine: String? = null
+            val headers: MutableMap<String, String> = mutableMapOf()
+
+            while (reader.readLine().also { line = it } != null && line!!.isNotEmpty()) {
+                if (requestLine == null) {
+                    requestLine = line
+                } else {
+                    val parts = line!!.split(": ", limit = 2)
+                    if (parts.size == 2) {
+                        headers[parts[0]] = parts[1]
+                    }
+                }
+            }
+
+            Log.d(TAG, "RTSP Request: $requestLine")
+
+            val parts = requestLine?.split(" ") ?: return
+            val method = parts[0]
+
+            when (method) {
+                "OPTIONS" -> {
+                    sendRtspResponse(output, 200, "OK", mapOf(
+                        "CSeq" to (headers["CSeq"] ?: "0"),
+                        "Public" to "OPTIONS, DESCRIBE, SETUP, PLAY, PAUSE, TEARDOWN"
+                    ))
+                }
+                "DESCRIBE" -> {
+                    clientAddress = clientSocket.inetAddress
+                    val sdp = generateSdp()
+                    sendRtspResponse(output, 200, "OK", mapOf(
+                        "CSeq" to (headers["CSeq"] ?: "0"),
+                        "Content-Base" to "rtsp://${clientSocket?.inetAddress?.hostAddress}:$serverPort/",
+                        "Content-Type" to "application/sdp",
+                        "Content-Length" to sdp.length.toString()
+                    ), sdp)
+                }
+                "SETUP" -> {
+                    val transportHeader = headers["Transport"] ?: ""
+                    // Parse client_port from Transport header
+                    val portMatch = Regex("client_port=(\\d+)-(\\d+)").find(transportHeader)
+                    if (portMatch != null) {
+                        clientRtpPort = portMatch.groupValues[1].toInt()
+                        clientRtcpPort = portMatch.groupValues[2].toInt()
+                        Log.d(TAG, "Client RTP port: $clientRtpPort, RTCP port: $clientRtcpPort")
+                    }
+
+                    sendRtspResponse(output, 200, "OK", mapOf(
+                        "CSeq" to (headers["CSeq"] ?: "0"),
+                        "Transport" to "RTP/AVP;unicast;client_port=$clientRtpPort-$clientRtcpPort;server_port=9000-9001;mode=play",
+                        "Session" to session_id
+                    ))
+                }
+                "PLAY" -> {
+                    // Create RTP socket and start streaming
+                    try {
+                        rtpSocket = Socket(clientAddress, clientRtpPort)
+                        rtspSessionActive.set(true)
+
+                        // Start RTP sender thread
+                        rtpSenderThread = Thread { sendRtpPackets() }.apply { start() }
+
+                        sendRtspResponse(output, 200, "OK", mapOf(
+                            "CSeq" to (headers["CSeq"] ?: "0"),
+                            "Session" to session_id,
+                            "RTP-Info" to "url=rtsp://${clientSocket?.inetAddress?.hostAddress}:$serverPort/stream;seq=0;rtptime=0"
+                        ))
+                        Log.d(TAG, "RTSP PLAY started, streaming RTP to $clientAddress:$clientRtpPort")
+                    } catch (e: Exception) {
+                        Log.e(TAG, "Error setting up RTP socket", e)
+                        sendRtspResponse(output, 500, "Internal Server Error", mapOf(
+                            "CSeq" to (headers["CSeq"] ?: "0"),
+                            "Session" to session_id
+                        ))
+                    }
+                }
+                "PAUSE" -> {
+                    rtspSessionActive.set(false)
+                    sendRtspResponse(output, 200, "OK", mapOf(
+                        "CSeq" to (headers["CSeq"] ?: "0"),
+                        "Session" to session_id
+                    ))
+                }
+                "TEARDOWN" -> {
+                    rtspSessionActive.set(false)
+                    rtpSocket?.close()
+                    sendRtspResponse(output, 200, "OK", mapOf(
+                        "CSeq" to (headers["CSeq"] ?: "0"),
+                        "Session" to session_id
+                    ))
+                }
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Error handling RTSP client", e)
+        }
+    }
+
+    private fun generateSdp(): String {
+        return """
+v=0
+o=- 0 0 IN IP4 ${serverSocket?.inetAddress?.hostAddress}
+s=Mobistream
+c=IN IP4 ${serverSocket?.inetAddress?.hostAddress}
+t=0 0
+m=video 0 RTP/AVP 96
+a=rtpmap:96 H264/90000
+a=fmtp:96 packetization-mode=1;profile-level-id=42e01f;sprop-parameter-sets=${spsBase64},${ppsBase64}
+a=control:streamid=0
+        """.trimIndent()
+    }
+
+    private val spsBase64: String
+        get() = android.util.Base64.encodeToString(sps, android.util.Base64.NO_WRAP)
+
+    private val ppsBase64: String
+        get() = android.util.Base64.encodeToString(pps, android.util.Base64.NO_WRAP)
+
+    private fun sendRtspResponse(
+        output: DataOutputStream,
+        statusCode: Int,
+        statusText: String,
+        headers: Map<String, String>,
+        body: String = ""
+    ) {
+        try {
+            output.writeBytes("RTSP/1.0 $statusCode $statusText\r\n")
+            headers.forEach { (key, value) ->
+                output.writeBytes("$key: $value\r\n")
+            }
+            if (body.isNotEmpty()) {
+                output.writeBytes("\r\n$body")
+            } else {
+                output.writeBytes("\r\n")
+            }
+            output.flush()
+            Log.d(TAG, "Sent RTSP $statusCode response")
+        } catch (e: Exception) {
+            Log.e(TAG, "Error sending RTSP response", e)
+        }
+    }
+
+    private fun sendRtpPackets() {
+        val rtpOutput = DataOutputStream(rtpSocket?.getOutputStream())
+        var timestamp = 0
+        val clockRate = 90000
+
+        while (rtspSessionActive.get() && isStreaming.get()) {
+            try {
+                val frames = synchronized(frameQueueLock) {
+                    frameQueue.toList()
+                }
+
+                if (frames.isNotEmpty()) {
+                    val frame = frames.last()
+
+                    // Send SPS and PPS first if available
+                    if (sps != null && pps != null) {
+                        sendRtpNal(rtpOutput, sps!!, timestamp, false)
+                        sendRtpNal(rtpOutput, pps!!, timestamp, false)
+                        sps = null // Only send once per stream start
+                        pps = null
+                    }
+
+                    // Send frame data
+                    sendRtpNal(rtpOutput, frame, timestamp, true)
+
+                    // Increment timestamp (assuming 30fps)
+                    timestamp += clockRate / 30
+                }
+
+                Thread.sleep(33) // ~30fps
+            } catch (e: Exception) {
+                if (rtspSessionActive.get()) {
+                    Log.e(TAG, "Error sending RTP packet", e)
+                }
+            }
+        }
+    }
+
+    private fun sendRtpNal(output: DataOutputStream, data: ByteArray, timestamp: Int, isFrame: Boolean) {
+        val maxPayloadSize = 1400
+
+        if (data.size <= maxPayloadSize) {
+            // Single NAL unit packet
+            val packet = ByteArrayOutputStream()
+            val seqNum = rtpSequenceNumber.getAndIncrement()
+            // RTP header
+            packet.write(0x80) // V=2, P=0, X=0, CC=0
+            packet.write(if (isFrame) 0xE8 else 0x78) // M=1 for frame, PT=96 (H264)
+            packet.write((seqNum shr 8) and 0xFF)
+            packet.write(seqNum and 0xFF)
+            packet.write((timestamp shr 24) and 0xFF)
+            packet.write((timestamp shr 16) and 0xFF)
+            packet.write((timestamp shr 8) and 0xFF)
+            packet.write(timestamp and 0xFF)
+            packet.write(0x12) // SSRC
+            packet.write(0x34)
+            packet.write(0x56)
+            packet.write(0x78)
+
+            // NAL data
+            packet.write(data)
+            output.write(packet.toByteArray())
+            output.flush()
+        } else {
+            // Fragmentation unit (FU-A) for large frames
+            val nalHeader = data.copyOfRange(0, 1)
+            val nalData = data.copyOfRange(1, data.size)
+
+            var offset = 0
+            var isStart = true
+            var isEnd = false
+
+            while (offset < nalData.size) {
+                val remaining = nalData.size - offset
+                val payloadSize = if (remaining > maxPayloadSize - 2) maxPayloadSize - 2 else remaining
+                isEnd = (offset + payloadSize >= nalData.size)
+
+                val fuIndicator = (nalHeader[0].toInt() and 0xE0) or (28 shl 0) // FU-A
+                val fuHeader = (if (isStart) 0x80 else 0x00) or (if (isEnd) 0x40 else 0x00) or (nalHeader[0].toInt() and 0x1F)
+
+                val packet = ByteArrayOutputStream()
+                val seqNum = rtpSequenceNumber.getAndIncrement()
+                // RTP header
+                packet.write(0x80)
+                packet.write(if (isEnd) 0xE8 else 0x78) // M=1 for last fragment
+                packet.write((seqNum shr 8) and 0xFF)
+                packet.write(seqNum and 0xFF)
+                packet.write((timestamp shr 24) and 0xFF)
+                packet.write((timestamp shr 16) and 0xFF)
+                packet.write((timestamp shr 8) and 0xFF)
+                packet.write(timestamp and 0xFF)
+                packet.write(0x12)
+                packet.write(0x34)
+                packet.write(0x56)
+                packet.write(0x78)
+
+                // FU-A header
+                packet.write(fuIndicator)
+                packet.write(fuHeader)
+
+                // Payload
+                packet.write(nalData, offset, payloadSize)
+                output.write(packet.toByteArray())
+                output.flush()
+
+                offset += payloadSize
+            }
+        }
+    }
+
+    private fun stopRtspServer() {
+        isStreaming.set(false)
+        rtspSessionActive.set(false)
+
+        try { serverSocket?.close() } catch (e: Exception) {}
+        serverSocket = null
+
+        try { rtpSocket?.close() } catch (e: Exception) {}
+        rtpSocket = null
+
+        try { cameraDevice?.close() } catch (e: Exception) {}
+        cameraDevice = null
+
+        try { mediaCodec?.stop() } catch (e: Exception) {}
+        try { mediaCodec?.release() } catch (e: Exception) {}
+        mediaCodec = null
+
+        try { surface?.release() } catch (e: Exception) {}
+        surface = null
+
+        try { surfaceTexture?.release() } catch (e: Exception) {}
+        surfaceTexture = null
+
+        rtspServerThread?.interrupt()
+        rtpSenderThread?.interrupt()
+
+        Log.d(TAG, "RTSP server stopped")
+    }
+
+    override fun onDestroy() {
+        super.onDestroy()
+        stopRtspServer()
+    }
+}
