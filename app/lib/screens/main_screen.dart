@@ -1,12 +1,12 @@
 import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:wakelock_plus/wakelock_plus.dart';
-import 'package:camera/camera.dart';
+import 'package:flutter_webrtc/flutter_webrtc.dart';
 import '../config/stream_config.dart';
 import '../config/app_constants.dart';
 import '../services/network_info.dart';
 import '../services/stream_service.dart';
-import '../services/mjpeg_stream_service.dart';
+import '../services/webrtc_stream_service.dart';
 import '../widgets/ip_display.dart';
 import '../widgets/stream_controls.dart';
 import 'help_screen.dart';
@@ -21,11 +21,12 @@ class MainScreen extends StatefulWidget {
 
 class _MainScreenState extends State<MainScreen> {
   final NetworkInfoService _networkInfoService = NetworkInfoService();
-  final MjpegStreamService _streamService = MjpegStreamService();
+  final WebRtcStreamService _streamService = WebRtcStreamService();
 
   StreamSelection _selection = const StreamSelection(
     cameraNumber: AppConstants.defaultCameraNumber,
     quality: StreamConfig.good,
+    streamName: 'cam1',
   );
 
   NetworkConnectionInfo? _networkInfo;
@@ -40,6 +41,8 @@ class _MainScreenState extends State<MainScreen> {
   }
 
   Future<void> _initialize() async {
+    await _streamService.initializeRenderer();
+
     // Get network info
     final networkInfo = await _networkInfoService.getConnectionInfo();
     if (networkInfo == null) {
@@ -51,8 +54,21 @@ class _MainScreenState extends State<MainScreen> {
       _networkInfo = networkInfo;
     });
 
+    // Try auto-discovery
+    _discoverMediaMtx();
+
     // Enable wakelock to keep screen on
     await WakelockPlus.enable();
+  }
+
+  Future<void> _discoverMediaMtx() async {
+    final ip = await _networkInfoService.discoverMediaMtx();
+    if (ip != null && mounted) {
+      setState(() {
+        _selection = _selection.copyWith(mediaMtxIp: ip);
+      });
+      _showSuccess('MediaMTX discovered at $ip');
+    }
   }
 
   void _onStreamStateChanged(StreamState state) {
@@ -77,11 +93,17 @@ class _MainScreenState extends State<MainScreen> {
       return;
     }
 
-    final port = AppConstants.getPortForCamera(_selection.cameraNumber);
+    if (_selection.mediaMtxIp.isEmpty) {
+      _showError('Please enter MediaMTX IP address');
+      return;
+    }
+
     await _streamService.startStream(
-      port: port,
+      port: AppConstants.mediaMtxWhipPort,
       config: _selection.quality,
       cameraNumber: _selection.cameraNumber,
+      mediaMtxIp: _selection.mediaMtxIp,
+      streamName: _selection.streamName,
     );
   }
 
@@ -99,6 +121,16 @@ class _MainScreenState extends State<MainScreen> {
     );
   }
 
+  void _showSuccess(String message) {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(message),
+        backgroundColor: Colors.green,
+      ),
+    );
+  }
+
   @override
   void dispose() {
     _streamService.dispose();
@@ -112,11 +144,14 @@ class _MainScreenState extends State<MainScreen> {
       backgroundColor: Colors.black,
       body: Stack(
         children: [
-          // Camera preview using Flutter camera package
-          if (_streamService.cameraController != null &&
-              _streamService.cameraController!.value.isInitialized)
+          // Camera preview using WebRTC renderer
+          if (_streamService.localRenderer != null &&
+              _streamService.localRenderer!.srcObject != null)
             Positioned.fill(
-              child: CameraPreview(_streamService.cameraController!),
+              child: RTCVideoView(
+                _streamService.localRenderer!,
+                objectFit: RTCVideoViewObjectFit.RTCVideoViewObjectFitCover,
+              ),
             )
           else if (_streamState == StreamState.starting)
             const ColoredBox(
@@ -169,8 +204,9 @@ class _MainScreenState extends State<MainScreen> {
           if (_showIpDisplay)
             Positioned.fill(
               child: IPDisplayWidget(
-                ipAddress: _networkInfo!.ipAddress,
-                port: AppConstants.getPortForCamera(_selection.cameraNumber),
+                ipAddress: _selection.mediaMtxIp,
+                port: 8889, // Default MediaMTX WHEP/HLS/etc port
+                streamName: _selection.streamName,
                 onBack: () {
                   setState(() {
                     _showIpDisplay = false;
@@ -189,7 +225,10 @@ class _MainScreenState extends State<MainScreen> {
                 selection: _selection,
                 onCameraNumberChanged: (cameraNumber) {
                   setState(() {
-                    _selection = _selection.copyWith(cameraNumber: cameraNumber);
+                    _selection = _selection.copyWith(
+                      cameraNumber: cameraNumber,
+                      streamName: 'cam$cameraNumber',
+                    );
                   });
                 },
                 onQualityChanged: (quality) {
@@ -197,6 +236,17 @@ class _MainScreenState extends State<MainScreen> {
                     _selection = _selection.copyWith(quality: quality);
                   });
                 },
+                onMediaMtxIpChanged: (ip) {
+                  setState(() {
+                    _selection = _selection.copyWith(mediaMtxIp: ip);
+                  });
+                },
+                onStreamNameChanged: (name) {
+                  setState(() {
+                    _selection = _selection.copyWith(streamName: name);
+                  });
+                },
+                onDiscover: _discoverMediaMtx,
                 onStartStream: _startStream,
                 onStopStream: _stopStream,
                 isStreaming: _streamState == StreamState.streaming ||

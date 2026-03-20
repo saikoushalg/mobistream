@@ -6,6 +6,9 @@ class AppConstants {
   /// Base SRT port for Camera 1
   static const int baseSrtPort = 9000;
 
+  /// MediaMTX WHIP port (default)
+  static const int mediaMtxWhipPort = 8889;
+
   /// Maximum number of cameras supported
   static const int maxCameras = 8;
 

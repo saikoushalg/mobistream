@@ -24,6 +24,8 @@ class FFmpegStreamService implements StreamService {
     required int port,
     required StreamConfig config,
     int cameraNumber = 1,
+    String mediaMtxIp = '',
+    String streamName = '',
   }) async {
     if (_currentState == StreamState.streaming) {
       debugPrint('FFmpegStreamService: Already streaming');

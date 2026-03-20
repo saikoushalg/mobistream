@@ -23,6 +23,8 @@ abstract class StreamService {
     required int port,
     required StreamConfig config,
     int cameraNumber = 1,
+    String mediaMtxIp = '',
+    String streamName = '',
   });
 
   /// Stop the current stream.

@@ -22,43 +22,43 @@ class HelpScreen extends StatelessWidget {
           children: [
             _buildSection(
               'Welcome to Mobistream!',
-              '''Use your phone as a wireless camera for OBS Studio using HTTP MJPEG streaming.
+              '''Use your phone as a wireless camera for OBS Studio using WebRTC streaming.
 
-Simple, reliable streaming (100-800ms latency) - no cloud services needed!''',
+Low latency (<200ms) video and audio streaming to OBS via MediaMTX!''',
               Icons.video_camera_front,
               theme,
             ),
             const SizedBox(height: 24),
 
             _buildSection(
-              'HTTP MJPEG Streaming',
-              '''Mobistream uses HTTP MJPEG streaming for simple, reliable video.
+              'WebRTC Streaming',
+              '''Mobistream uses WebRTC and MediaMTX for high-quality, low-latency video and audio.
 
 How it works:
-• Your phone becomes an HTTP server
-• OBS connects directly to your phone
-• No cloud services needed
-• Latency: 100-800ms (depending on network)''',
+• You run MediaMTX on your computer (same as OBS)
+• Your phone streams to MediaMTX using WHIP
+• OBS pulls the stream from MediaMTX using WHEP
+• No cloud services needed, works over local network''',
               Icons.info_outline,
               theme,
             ),
             const SizedBox(height: 24),
 
             _buildSection(
-              'OBS Setup (HTTP MJPEG)',
+              'OBS Setup (WHEP)',
               '''Step-by-Step:
-1. In Mobistream, tap "Start Streaming"
-2. Note the MJPEG URL displayed (e.g., http://192.168.1.100:9000/stream)
-3. In OBS: Add Source → Media Source
-4. Uncheck "Local File"
-5. Input: Paste the MJPEG URL
-6. Click OK
-7. Video appears in OBS preview!
+1. Run MediaMTX on your PC (port 8889)
+2. In Mobistream, enter your PC's IP address
+3. Tap "Start Streaming"
+4. In OBS: Add Source → Browser Source
+5. URL: Paste the WHEP URL displayed (e.g., http://192.168.1.5:8889/cam1/whep)
+6. Width/Height: Set according to selected quality
+7. Click OK
+8. Video appears in OBS preview!
 
 Tips:
-• Works with any OBS version
-• No special plugins needed
-• Test URL in browser first''',
+• MediaMTX must be running before you start streaming
+• Ensure your firewall allows MediaMTX ports (8889)''',
               Icons.settings,
               theme,
             ),
@@ -68,17 +68,15 @@ Tips:
               'Multi-Camera Setup',
               '''Want multiple phones as cameras?
 
-Each phone should select a different "Camera Number":
-• Phone 1 → Camera 1 → Port 9000
-• Phone 2 → Camera 2 → Port 9001
-• Phone 3 → Camera 3 → Port 9002
+Each phone should have a different "Stream Name":
+• Phone 1 → Stream Name: "cam1"
+• Phone 2 → Stream Name: "cam2"
 
-Each phone will have its own MJPEG URL:
-• Phone 1: http://192.168.1.100:9000/stream
-• Phone 2: http://192.168.1.100:9001/stream
-• Phone 3: http://192.168.1.100:9002/stream
+Each phone will have its own WHEP URL:
+• Phone 1: http://192.168.1.5:8889/cam1/whep
+• Phone 2: http://192.168.1.5:8889/cam2/whep
 
-In OBS, add multiple Media Sources, one for each camera.''',
+In OBS, add multiple Browser Sources, one for each camera.''',
               Icons.devices,
               theme,
             ),
