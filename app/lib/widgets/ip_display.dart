@@ -5,17 +5,19 @@ import 'package:share_plus/share_plus.dart';
 class IPDisplayWidget extends StatelessWidget {
   final String ipAddress;
   final int port;
+  final String streamName;
   final VoidCallback onBack;
 
   const IPDisplayWidget({
     super.key,
     required this.ipAddress,
     required this.port,
+    required this.streamName,
     required this.onBack,
   });
 
-  /// HTTP MJPEG URL for OBS
-  String get _streamUrl => 'http://$ipAddress:$port/stream';
+  /// WebRTC WHEP URL for OBS
+  String get _streamUrl => 'http://$ipAddress:$port/$streamName/whep';
 
   @override
   Widget build(BuildContext context) {
@@ -84,7 +86,7 @@ class IPDisplayWidget extends StatelessWidget {
                   child: Column(
                     children: [
                       Text(
-                        'MJPEG URL for OBS:',
+                        'WHEP URL for OBS:',
                         style: theme.textTheme.titleMedium?.copyWith(
                           color: Colors.white70,
                         ),
@@ -101,7 +103,7 @@ class IPDisplayWidget extends StatelessWidget {
                       ),
                       const SizedBox(height: 12),
                       Text(
-                        'Add as Media Source in OBS',
+                        'Add as Browser Source in OBS',
                         style: theme.textTheme.bodySmall?.copyWith(
                           color: Colors.green,
                           fontStyle: FontStyle.italic,
@@ -157,7 +159,7 @@ class IPDisplayWidget extends StatelessWidget {
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
                       Text(
-                        'How to connect in OBS (HTTP MJPEG):',
+                        'How to connect in OBS (WHEP):',
                         style: theme.textTheme.titleMedium?.copyWith(
                           color: Colors.white,
                           fontWeight: FontWeight.bold,
@@ -165,15 +167,15 @@ class IPDisplayWidget extends StatelessWidget {
                       ),
                       const SizedBox(height: 12),
                       _buildInstructionText(
-                        '1. In OBS, add Media Source',
+                        '1. In OBS, add Browser Source',
                         theme,
                       ),
                       _buildInstructionText(
-                        '2. Uncheck "Local File"',
+                        '2. URL: Paste the WHEP URL above',
                         theme,
                       ),
                       _buildInstructionText(
-                        '3. Input: Paste the MJPEG URL above',
+                        '3. Width/Height: Set according to quality',
                         theme,
                       ),
                       _buildInstructionText(
@@ -224,7 +226,7 @@ class IPDisplayWidget extends StatelessWidget {
   void _copyToClipboard(BuildContext context) {
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(
-        content: Text('MJPEG URL copied: $_streamUrl'),
+        content: Text('WHEP URL copied: $_streamUrl'),
         duration: const Duration(seconds: 2),
       ),
     );
@@ -233,7 +235,7 @@ class IPDisplayWidget extends StatelessWidget {
   void _shareUrl() {
     Share.share(
       'Connect to my Mobistream camera: $_streamUrl',
-      subject: 'Mobistream MJPEG URL',
+      subject: 'Mobistream WHEP URL',
     );
   }
 }

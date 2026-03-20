@@ -6,19 +6,27 @@ import '../config/app_constants.dart';
 class StreamSelection {
   final int cameraNumber;
   final StreamConfig quality;
+  final String mediaMtxIp;
+  final String streamName;
 
   const StreamSelection({
     required this.cameraNumber,
     required this.quality,
+    this.mediaMtxIp = '',
+    this.streamName = '',
   });
 
   StreamSelection copyWith({
     int? cameraNumber,
     StreamConfig? quality,
+    String? mediaMtxIp,
+    String? streamName,
   }) {
     return StreamSelection(
       cameraNumber: cameraNumber ?? this.cameraNumber,
       quality: quality ?? this.quality,
+      mediaMtxIp: mediaMtxIp ?? this.mediaMtxIp,
+      streamName: streamName ?? this.streamName,
     );
   }
 }
@@ -28,8 +36,11 @@ class StreamControlsWidget extends StatelessWidget {
   final StreamSelection selection;
   final Function(int cameraNumber) onCameraNumberChanged;
   final Function(StreamConfig quality) onQualityChanged;
+  final Function(String ip) onMediaMtxIpChanged;
+  final Function(String name) onStreamNameChanged;
   final VoidCallback onStartStream;
   final VoidCallback onStopStream;
+  final VoidCallback onDiscover;
   final bool isStreaming;
 
   const StreamControlsWidget({
@@ -37,8 +48,11 @@ class StreamControlsWidget extends StatelessWidget {
     required this.selection,
     required this.onCameraNumberChanged,
     required this.onQualityChanged,
+    required this.onMediaMtxIpChanged,
+    required this.onStreamNameChanged,
     required this.onStartStream,
     required this.onStopStream,
+    required this.onDiscover,
     required this.isStreaming,
   });
 
@@ -62,16 +76,63 @@ class StreamControlsWidget extends StatelessWidget {
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            // Camera number selector
-            _buildSectionTitle('Camera Number', theme),
+            // MediaMTX IP
+            _buildSectionTitle('MediaMTX IP', theme),
             const SizedBox(height: 8),
-            _buildCameraNumberSelector(),
+            Row(
+              children: [
+                Expanded(
+                  child: _buildTextField(
+                    initialValue: selection.mediaMtxIp,
+                    onChanged: onMediaMtxIpChanged,
+                    hint: 'e.g. 192.168.1.5',
+                  ),
+                ),
+                const SizedBox(width: 8),
+                IconButton.filled(
+                  onPressed: isStreaming ? null : onDiscover,
+                  icon: const Icon(Icons.search),
+                  tooltip: 'Discover MediaMTX',
+                ),
+              ],
+            ),
             const SizedBox(height: 16),
 
-            // Quality selector
-            _buildSectionTitle('Quality', theme),
+            // Stream Name
+            _buildSectionTitle('Stream Name', theme),
             const SizedBox(height: 8),
-            _buildQualitySelector(theme),
+            _buildTextField(
+              initialValue: selection.streamName,
+              onChanged: onStreamNameChanged,
+              hint: 'e.g. cam1',
+            ),
+            const SizedBox(height: 16),
+
+            Row(
+              children: [
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      _buildSectionTitle('Camera', theme),
+                      const SizedBox(height: 8),
+                      _buildCameraNumberSelector(),
+                    ],
+                  ),
+                ),
+                const SizedBox(width: 16),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      _buildSectionTitle('Quality', theme),
+                      const SizedBox(height: 8),
+                      _buildQualitySelector(theme),
+                    ],
+                  ),
+                ),
+              ],
+            ),
             const SizedBox(height: 24),
 
             // Start/Stop button
@@ -163,6 +224,30 @@ class StreamControlsWidget extends StatelessWidget {
             ),
           ),
         ),
+      ),
+    );
+  }
+
+  Widget _buildTextField({
+    required String initialValue,
+    required Function(String) onChanged,
+    required String hint,
+  }) {
+    return TextFormField(
+      initialValue: initialValue,
+      onChanged: onChanged,
+      enabled: !isStreaming,
+      style: const TextStyle(color: Colors.white),
+      decoration: InputDecoration(
+        hintText: hint,
+        hintStyle: const TextStyle(color: Colors.white24),
+        filled: true,
+        fillColor: Colors.white.withValues(alpha: 0.1),
+        border: OutlineInputBorder(
+          borderRadius: BorderRadius.circular(8),
+          borderSide: BorderSide.none,
+        ),
+        contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
       ),
     );
   }
