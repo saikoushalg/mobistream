@@ -1,0 +1,84 @@
+# MediaMTX Configuration for Local WHIP/WHEP Streaming
+# Save as: mediamtx.yml
+
+# Global configuration
+logLevel: info
+logDestinations: [stdout]
+
+# API for debugging (optional)
+api: yes
+apiAddress: 127.0.0.1:9997
+
+# RTSP server (disable, we only need WHIP/WHEP)
+rtsp: no
+
+# HLS server (disable)
+hls: no
+
+# WebRTC server configuration
+webrtc:
+  # Enable WebRTC
+  yes: true
+
+  # Listen address (all interfaces)
+  address: 0.0.0.0:8888
+
+  # WHIP endpoint configuration
+  whip:
+    # Enable WHIP (WebRTC-HTTP ingestion)
+    yes: true
+
+    # WHIP endpoint path
+    path: /whip/{streamid}
+
+    # Authentication (disabled for local network)
+    readUser: ""
+    readPass: ""
+    # Write user for publishing (disabled)
+    writeUser: ""
+    writePass: ""
+
+  # WHEP endpoint configuration
+  whep:
+    # Enable WHEP (WebRTC-HTTP egress)
+    yes: true
+
+    # WHEP endpoint path
+    path: /whep/{streamid}
+
+    # Authentication (disabled for local network)
+    readUser: ""
+    readPass: ""
+
+  # ICE configuration for local network
+  iceServers: []
+
+  # ICE host candidates (local network IPs)
+  iceHostNAT1To1:
+    # Use the actual server IP for ICE candidates
+    - ip: 192.168.1.45
+      # LAN network
+      network: 192.168.0.0/16
+
+  # ICE UDP port range (optional, for firewall config)
+  iceUDPMuxAddress: 127.0.0.1:8189
+
+# Path configuration (stream routing)
+paths:
+  # Default path - allows any stream ID
+  all:
+    # Source: WHIP (from Flutter app)
+    source: whip
+    sourceWhipConf:
+      # Disable authentication
+      publishUser: ""
+      publishPass: ""
+
+    # Router: distribute to all readers
+    sourceRedirect: ""
+
+    # Read permissions (WHEP)
+    readUser: ""
+    readPass: ""
+
+# End of configuration

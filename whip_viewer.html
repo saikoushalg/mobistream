@@ -1,0 +1,261 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>WHIP Stream Viewer</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            width: 100vw;
+            height: 100vh;
+            overflow: hidden;
+            background: #000;
+        }
+
+        #video {
+            width: 100%;
+            height: 100%;
+            object-fit: contain;
+            background: #000;
+        }
+
+        #status {
+            position: absolute;
+            top: 10px;
+            left: 10px;
+            padding: 8px 12px;
+            background: rgba(0, 0, 0, 0.7);
+            color: #fff;
+            font-family: monospace;
+            font-size: 12px;
+            border-radius: 4px;
+            z-index: 1000;
+        }
+
+        #status.success {
+            background: rgba(0, 255, 0, 0.7);
+        }
+
+        #status.error {
+            background: rgba(255, 0, 0, 0.7);
+        }
+
+        #status.connecting {
+            background: rgba(255, 165, 0, 0.7);
+        }
+
+        #reconnect-info {
+            position: absolute;
+            bottom: 10px;
+            left: 10px;
+            padding: 8px 12px;
+            background: rgba(0, 0, 0, 0.7);
+            color: #aaa;
+            font-family: monospace;
+            font-size: 11px;
+            border-radius: 4px;
+            z-index: 1000;
+        }
+    </style>
+</head>
+<body>
+    <video id="video" autoplay playsinline muted></video>
+    <div id="status">Connecting...</div>
+    <div id="reconnect-info"></div>
+
+    <script>
+        // Configuration
+        const CONFIG = {
+            // Get stream ID from URL parameter (default: 'Main')
+            streamId: new URLSearchParams(window.location.search).get('stream') || 'Main',
+
+            // Get server IP from URL parameter (default: localhost)
+            serverIp: new URLSearchParams(window.location.search).get('server') || '192.168.1.45',
+
+            // Server port
+            port: 8080,
+        };
+
+        // State
+        let pc = null;
+        let retryCount = 0;
+        let currentRetryDelay = 2000;
+        let isConnecting = false;
+        let isConnected = false;
+
+        // DOM elements
+        const video = document.getElementById('video');
+        const statusEl = document.getElementById('status');
+        const reconnectInfoEl = document.getElementById('reconnect-info');
+
+        // Logging
+        function log(message, type = 'info') {
+            console.log(`[${new Date().toISOString()}] ${message}`);
+            statusEl.textContent = message;
+            statusEl.className = type;
+
+            if (type === 'connecting') {
+                reconnectInfoEl.textContent = `Connection attempt ${retryCount + 1}...`;
+            } else if (type === 'success') {
+                reconnectInfoEl.textContent = `Connected to: ${CONFIG.streamId}`;
+            } else if (type === 'error') {
+                reconnectInfoEl.textContent = `Reconnect ${retryCount + 1} in ${Math.round(currentRetryDelay / 1000)}s`;
+            }
+        }
+
+        // Create WebRTC Peer Connection
+        function createPeerConnection() {
+            const config = {
+                iceServers: [] // No STUN servers for local network
+            };
+
+            pc = new RTCPeerConnection(config);
+
+            // Handle incoming tracks
+            pc.ontrack = (event) => {
+                log('Received video track!', 'success');
+                if (event.streams && event.streams[0]) {
+                    video.srcObject = event.streams[0];
+                    isConnected = true;
+                    retryCount = 0;
+                    currentRetryDelay = 2000;
+                }
+            };
+
+            // Handle ICE candidates
+            pc.onicecandidate = (event) => {
+                if (event.candidate === null) {
+                    log('ICE gathering complete', 'success');
+                } else {
+                    console.log('ICE candidate received');
+                }
+            };
+
+            // Handle connection state changes
+            pc.onconnectionstatechange = () => {
+                const state = pc.connectionState;
+                log(`Connection: ${state}`, state === 'connected' ? 'success' : 'connecting');
+
+                if (state === 'failed' || state === 'disconnected') {
+                    isConnected = false;
+                    scheduleReconnect();
+                }
+            };
+
+            // Handle ICE connection state
+            pc.oniceconnectionstatechange = () => {
+                const state = pc.iceConnectionState;
+                log(`ICE: ${state}`, state === 'connected' ? 'success' : 'connecting');
+
+                if (state === 'failed' || state === 'disconnected') {
+                    isConnected = false;
+                    scheduleReconnect();
+                }
+            };
+
+            return pc;
+        }
+
+        // Start connection to WHIP server
+        async function startStream() {
+            if (isConnecting) return;
+            isConnecting = true;
+
+            try {
+                log(`Connecting to ${CONFIG.streamId}...`, 'connecting');
+
+                // Create peer connection
+                pc = createPeerConnection();
+
+                // Create offer
+                const offer = await pc.createOffer({
+                    offerToReceiveAudio: true,
+                    offerToReceiveVideo: true
+                });
+
+                await pc.setLocalDescription(offer);
+
+                // WHIP endpoint URL
+                const whipUrl = `http://${CONFIG.serverIp}:${CONFIG.port}/whip/${CONFIG.streamId}`;
+
+                log(`Sending WHIP request...`, 'connecting');
+
+                // Send WHIP POST request
+                const response = await fetch(whipUrl, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/sdp'
+                    },
+                    body: offer.sdp
+                });
+
+                if (!response.ok) {
+                    throw new Error(`WHIP request failed: ${response.status} ${response.statusText}`);
+                }
+
+                // Get SDP answer
+                const answerSdp = await response.text();
+
+                // Set remote description
+                await pc.setRemoteDescription(new RTCSessionDescription({
+                    type: 'answer',
+                    sdp: answerSdp
+                }));
+
+                log('Connection established!', 'success');
+                isConnecting = false;
+
+            } catch (error) {
+                log(`Error: ${error.message}`, 'error');
+                isConnecting = false;
+                scheduleReconnect();
+            }
+        }
+
+        // Schedule reconnection
+        function scheduleReconnect() {
+            if (retryCount >= 10) {
+                log('Max retries reached. Please refresh.', 'error');
+                return;
+            }
+
+            log(`Reconnecting in ${Math.round(currentRetryDelay / 1000)}s...`, 'error');
+
+            setTimeout(() => {
+                retryCount++;
+                currentRetryDelay = Math.min(
+                    currentRetryDelay * 1.5,
+                    30000
+                );
+
+                // Cleanup old connection
+                if (pc) {
+                    pc.close();
+                    pc = null;
+                }
+
+                startStream();
+            }, currentRetryDelay);
+        }
+
+        // Start streaming on load
+        window.addEventListener('load', () => {
+            log(`WHIP Viewer - Stream: ${CONFIG.streamId}`, 'info');
+            startStream();
+        });
+
+        // Cleanup on page unload
+        window.addEventListener('beforeunload', () => {
+            if (pc) {
+                pc.close();
+            }
+        });
+    </script>
+</body>
+</html>

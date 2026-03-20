@@ -1,0 +1,179 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>WHIP Test Viewer</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            background: #1a1a1a;
+            color: #fff;
+            padding: 20px;
+        }
+        .container {
+            max-width: 800px;
+            margin: 0 auto;
+        }
+        .status {
+            background: rgba(255, 255, 255, 0.1);
+            padding: 15px;
+            border-radius: 8px;
+            margin-bottom: 20px;
+        }
+        .status.success {
+            background: rgba(0, 255, 0, 0.2);
+            border: 1px solid #0f0;
+        }
+        .status.error {
+            background: rgba(255, 0, 0, 0.2);
+            border: 1px solid #f00;
+        }
+        #video {
+            width: 100%;
+            max-width: 640px;
+            background: #000;
+            border-radius: 8px;
+        }
+        .logs {
+            background: rgba(0, 0, 0, 0.5);
+            padding: 15px;
+            border-radius: 8px;
+            font-family: monospace;
+            font-size: 12px;
+            max-height: 200px;
+            overflow-y: auto;
+        }
+        .log-entry {
+            margin: 5px 0;
+        }
+        .log-entry.info { color: #0ff; }
+        .log-entry.success { color: #0f0; }
+        .log-entry.error { color: #f00; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🎥 WHIP Stream Test Viewer</h1>
+
+        <div class="status" id="status">Initializing...</div>
+
+        <video id="video" autoplay playsinline muted controls></video>
+
+        <div class="logs" id="logs"></div>
+    </div>
+
+    <script>
+        const CONFIG = {
+            streamId: new URLSearchParams(window.location.search).get('stream') || 'Main',
+            serverIp: new URLSearchParams(window.location.search).get('server') || '192.168.1.45',
+            port: 8080
+        };
+
+        const statusEl = document.getElementById('status');
+        const logsEl = document.getElementById('logs');
+        const video = document.getElementById('video');
+
+        function log(msg, type = 'info') {
+            const time = new Date().toLocaleTimeString();
+            const entry = document.createElement('div');
+            entry.className = `log-entry ${type}`;
+            entry.textContent = `[${time}] ${msg}`;
+            logsEl.appendChild(entry);
+            console.log(msg);
+        }
+
+        async function startConnection() {
+            try {
+                statusEl.textContent = 'Connecting to WHIP server...';
+                log('Creating WebRTC peer connection...', 'info');
+
+                const pc = new RTCPeerConnection({
+                    iceServers: [] // No STUN for local network
+                });
+
+                pc.onicecandidate = (event) => {
+                    if (event.candidate) {
+                        log(`ICE candidate: ${event.candidate.candidate.substring(0, 50)}...`, 'info');
+                    } else {
+                        log('ICE gathering complete', 'success');
+                    }
+                };
+
+                pc.ontrack = (event) => {
+                    log('📹 Video track received!', 'success');
+                    if (event.streams && event.streams[0]) {
+                        video.srcObject = event.streams[0];
+                        statusEl.textContent = '✅ Video is playing!';
+                        statusEl.className = 'status success';
+                        log('Video attached to element', 'success');
+                    }
+                };
+
+                pc.onconnectionstatechange = () => {
+                    log(`Connection state: ${pc.connectionState}`, 'info');
+                    if (pc.connectionState === 'connected') {
+                        statusEl.textContent = '✅ Connected!';
+                        statusEl.className = 'status success';
+                    } else if (pc.connectionState === 'failed') {
+                        statusEl.textContent = '❌ Connection failed';
+                        statusEl.className = 'status error';
+                        log('Connection failed. Please check if phone is streaming.', 'error');
+                    }
+                };
+
+                log('Creating SDP offer...', 'info');
+                const offer = await pc.createOffer({
+                    offerToReceiveAudio: true,
+                    offerToReceiveVideo: true
+                });
+
+                await pc.setLocalDescription(offer);
+                log('Local description set', 'info');
+
+                const whipUrl = `http://${CONFIG.serverIp}:${CONFIG.port}/whip/${CONFIG.streamId}`;
+                log(`Sending WHIP POST to: ${whipUrl}`, 'info');
+
+                const response = await fetch(whipUrl, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/sdp'
+                    },
+                    body: offer.sdp
+                });
+
+                if (!response.ok) {
+                    throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+                }
+
+                log(`Response: ${response.status} ${response.statusText}`, 'success');
+
+                const answerSdp = await response.text();
+                log('Received SDP answer from server', 'success');
+
+                await pc.setRemoteDescription(new RTCSessionDescription({
+                    type: 'answer',
+                    sdp: answerSdp
+                }));
+
+                log('Remote description set', 'success');
+                log('Connection established! Waiting for video...', 'info');
+
+            } catch (error) {
+                log(`❌ Error: ${error.message}`, 'error');
+                statusEl.textContent = `❌ Error: ${error.message}`;
+                statusEl.className = 'status error';
+                console.error(error);
+            }
+        }
+
+        // Auto-start on load
+        window.addEventListener('load', () => {
+            log(`WHIP Test Viewer`, 'info');
+            log(`Stream: ${CONFIG.streamId}`, 'info');
+            log(`Server: ${CONFIG.serverIp}:${CONFIG.port}`, 'info');
+            startConnection();
+        });
+    </script>
+</body>
+</html>

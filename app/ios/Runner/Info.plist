@@ -55,6 +55,10 @@
 	<string>This app needs microphone access to stream audio to OBS.</string>
 	<key>NSLocalNetworkUsageDescription</key>
 	<string>This app needs local network access to stream to OBS on your WiFi network.</string>
+	<key>NSBonjourServices</key>
+	<array>
+		<string>_obs_cam._tcp</string>
+	</array>
 	<key>UIRequiresPersistentWiFi</key>
 	<true/>
 	<key>UIBackgroundModes</key>
